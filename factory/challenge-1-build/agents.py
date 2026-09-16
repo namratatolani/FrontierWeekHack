@@ -51,35 +51,18 @@ def _load_sensor_batch() -> list[dict]:
 # This is already implemented — agents can call this to get threshold analysis
 # =============================================================================
 
-def check_thresholds(machine_id: str) -> str:
-    """
-    Reads sensor_data.json and checks if a machine's readings are within thresholds.
-    Returns a JSON string with the analysis.
-    """
-    with open(SENSOR_DATA_PATH, "r") as f:
-        data = json.load(f)
-
-    machine = None
-    for m in data["machines"]:
-        if m["machine_id"] == machine_id or m["name"] == machine_id:
-            machine = m
-            break
-
-    if not machine:
-        return json.dumps({"error": f"Machine '{machine_id}' not found"})
-
+def check_thresholds(machine_id: str, readings: dict, thresholds: dict) -> str:
+    """Check supplied sensor readings against supplied operating thresholds."""
     results = {
-        "machine_id": machine["machine_id"],
-        "name": machine["name"],
-        "status": machine["status"],
-        "last_maintenance": machine["last_maintenance"],
+        "machine_id": machine_id,
+        "status": "normal",
         "anomalies": [],
         "all_readings": {},
     }
 
-    for sensor, reading in machine["readings"].items():
+    for sensor, reading in readings.items():
         value = reading["value"]
-        threshold = machine["thresholds"][sensor]
+        threshold = thresholds[sensor]
         in_spec = threshold["min"] <= value <= threshold["max"]
 
         results["all_readings"][sensor] = {
@@ -108,22 +91,35 @@ def check_thresholds(machine_id: str) -> str:
                 "deviation": deviation,
             })
 
+    if len(results["anomalies"]) >= 3:
+        results["status"] = "critical"
+    elif results["anomalies"]:
+        results["status"] = "warning"
+
     return json.dumps(results, indent=2)
 
 
 # Tool definition for the agent (Foundry FunctionTool format)
 CHECK_THRESHOLDS_TOOL = FunctionTool(
     name="check_thresholds",
-    description="Check if a machine's sensor readings are within normal operating thresholds. Returns anomalies if any readings are out of spec.",
+    description="Check supplied sensor readings against their operating thresholds. Returns status and anomalies for the machine.",
     parameters={
         "type": "object",
         "properties": {
             "machine_id": {
                 "type": "string",
                 "description": "The machine ID (e.g., 'MX-001') or name (e.g., 'mixer') to check",
-            }
+            },
+            "readings": {
+                "type": "object",
+                "description": "Sensor readings keyed by sensor name, each with value and unit",
+            },
+            "thresholds": {
+                "type": "object",
+                "description": "Minimum and maximum operating thresholds keyed by sensor name",
+            },
         },
-        "required": ["machine_id"],
+        "required": ["machine_id", "readings", "thresholds"],
         "additionalProperties": False,
     },
     strict=False,
@@ -150,7 +146,8 @@ class AnomalyDetectionAgent:
 
         system_prompt = """
         You are an industrial sensor anomaly detection expert for TireForge Industries.
-        When asked to check machines, use the check_thresholds tool for each machine.
+        When asked to check machines, use the check_thresholds tool for each machine. Pass the machine_id,
+        readings, and thresholds from the supplied machine payload to the tool.
         For each machine, report:
         - Machine name and ID
         - Status (normal / warning / critical)
@@ -191,7 +188,11 @@ class AnomalyDetectionAgent:
             for item in function_calls:
                 if item.name == "check_thresholds":
                     args = json.loads(item.arguments)
-                    result = check_thresholds(args["machine_id"])
+                    result = check_thresholds(
+                        args["machine_id"],
+                        args["readings"],
+                        args["thresholds"],
+                    )
                 else:
                     result = json.dumps({"error": f"Unknown tool '{item.name}'"})
 
